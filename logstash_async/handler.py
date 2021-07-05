@@ -1,19 +1,26 @@
-# -*- coding: utf-8 -*-
-#
-# This software may be modified and distributed under the terms
-# of the MIT license.  See the LICENSE file for details.
+"""
+This file is ALMOST THE SAME than the file in the original package:
+https://github.com/eht16/python-logstash-async/blob/master/logstash_async/handler.py
 
+The only difference is that in the original package, AsynchronousLogstashHandler uses one static
+worker thread for all loggers. On the other hand, this module uses one instance worker thread
+per logger. This way we can manage the worker thread lifecycle easier.
+
+It solves the problem (in distributed environments) where a worker node "seems to have done all
+the work" but it still has background data to work on, however the master node does not know
+about it and kills the worker node. Using the instance thread allow us to directly call
+"shutdown" when destroying the logger instance.
+"""
 from logging import Handler
 
 from logstash_async.constants import constants
 from logstash_async.formatter import LogstashFormatter
 from logstash_async.utils import import_string, safe_log_via_print
 from logstash_async.worker import LogProcessingWorker
-import logstash_async
 
 
 class ProcessingError(Exception):
-    """"""
+    """ """
 
 
 class SynchronousLogstashHandler(Handler):
@@ -32,9 +39,20 @@ class SynchronousLogstashHandler(Handler):
 
     # ----------------------------------------------------------------------
     # pylint: disable=too-many-arguments
-    def __init__(self, host, port, transport='logstash_async.transport.TcpTransport',
-                 ssl_enable=False, ssl_verify=True, keyfile=None, certfile=None, ca_certs=None,
-                 enable=True, encoding='utf-8', **kwargs):
+    def __init__(
+        self,
+        host,
+        port,
+        transport="logstash_async.transport.TcpTransport",
+        ssl_enable=False,
+        ssl_verify=True,
+        keyfile=None,
+        certfile=None,
+        ca_certs=None,
+        enable=True,
+        encoding="utf-8",
+        **kwargs
+    ):
         super().__init__()
         self._host = host
         self._port = port
@@ -77,18 +95,20 @@ class SynchronousLogstashHandler(Handler):
             keyfile=self._keyfile,
             certfile=self._certfile,
             ca_certs=self._ca_certs,
-            **kwargs)
+            **kwargs
+        )
         if isinstance(self._transport_path, str):
             transport_class = import_string(self._transport_path)
             self._transport = transport_class(**transport_args)
         elif callable(self._transport_path):
             self._transport = self._transport_path(**transport_args)
-        elif hasattr(self._transport_path, 'send'):
+        elif hasattr(self._transport_path, "send"):
             self._transport = self._transport_path
         else:
             raise RuntimeError(
-                'Invalid transport path: must be an importable module path, '
-                'a class or factory function or an instance.')
+                "Invalid transport path: must be an importable module path, "
+                "a class or factory function or an instance."
+            )
 
     # ----------------------------------------------------------------------
     def _format_record(self, record):
@@ -96,7 +116,7 @@ class SynchronousLogstashHandler(Handler):
         formatted = self.formatter.format(record)
         if isinstance(formatted, str):
             formatted = formatted.encode(self._encoding)  # pylint: disable=redefined-variable-type
-        return formatted + b'\n'
+        return formatted + b"\n"
 
     # ----------------------------------------------------------------------
     def _create_formatter_if_necessary(self):
@@ -122,7 +142,7 @@ class SynchronousLogstashHandler(Handler):
             if self._transport is not None:
                 self._transport.close()
         except Exception as exc:
-            safe_log_via_print('error', u'Error on closing transport: {}'.format(exc))
+            safe_log_via_print("error", u"Error on closing transport: {}".format(exc))
 
 
 class AsynchronousLogstashHandler(SynchronousLogstashHandler):
@@ -134,20 +154,42 @@ class AsynchronousLogstashHandler(SynchronousLogstashHandler):
                       the database. (Given in seconds. Default is None, and disables this feature)
     """
 
-    _worker_thread = None
-
     # ----------------------------------------------------------------------
     # pylint: disable=too-many-arguments
-    def __init__(self, host, port, database_path, transport='logstash_async.transport.TcpTransport',
-                 ssl_enable=False, ssl_verify=True, keyfile=None, certfile=None, ca_certs=None,
-                 enable=True, event_ttl=None, encoding='utf-8', **kwargs):
-
+    def __init__(
+        self,
+        host,
+        port,
+        database_path,
+        transport="logstash_async.transport.TcpTransport",
+        ssl_enable=False,
+        ssl_verify=True,
+        keyfile=None,
+        certfile=None,
+        ca_certs=None,
+        enable=True,
+        event_ttl=None,
+        encoding="utf-8",
+        **kwargs
+    ):
+        self.cache = {}
         self._database_path = database_path
         self._event_ttl = event_ttl
+        self._worker_thread = None
 
-        super().__init__(host, port, transport,
-                 ssl_enable, ssl_verify, keyfile, certfile, ca_certs,
-                 enable, encoding, **kwargs)
+        super().__init__(
+            host,
+            port,
+            transport,
+            ssl_enable,
+            ssl_verify,
+            keyfile,
+            certfile,
+            ca_certs,
+            enable,
+            encoding,
+            **kwargs
+        )
 
     # ----------------------------------------------------------------------
     def emit(self, record):
@@ -160,7 +202,7 @@ class AsynchronousLogstashHandler(SynchronousLogstashHandler):
         # basically same implementation as in logging.handlers.SocketHandler.emit()
         try:
             data = self._format_record(record)
-            AsynchronousLogstashHandler._worker_thread.enqueue_event(data)
+            self._worker_thread.enqueue_event(data)
         except Exception:
             self.handleError(record)
 
@@ -174,7 +216,7 @@ class AsynchronousLogstashHandler(SynchronousLogstashHandler):
         if self._worker_thread_is_running():
             return
 
-        AsynchronousLogstashHandler._worker_thread = LogProcessingWorker(
+        self._worker_thread = LogProcessingWorker(
             host=self._host,
             port=self._port,
             transport=self._transport,
@@ -184,14 +226,14 @@ class AsynchronousLogstashHandler(SynchronousLogstashHandler):
             certfile=self._certfile,
             ca_certs=self._ca_certs,
             database_path=self._database_path,
-            cache=logstash_async.EVENT_CACHE,
-            event_ttl=self._event_ttl)
-        AsynchronousLogstashHandler._worker_thread.start()
+            cache=self.cache,
+            event_ttl=self._event_ttl,
+        )
+        self._worker_thread.start()
 
     # ----------------------------------------------------------------------
-    @staticmethod
-    def _worker_thread_is_running():
-        worker_thread = AsynchronousLogstashHandler._worker_thread
+    def _worker_thread_is_running(self):
+        worker_thread = self._worker_thread
         if worker_thread is not None and worker_thread.is_alive():
             return True
 
@@ -209,12 +251,12 @@ class AsynchronousLogstashHandler(SynchronousLogstashHandler):
 
     # ----------------------------------------------------------------------
     def _trigger_worker_shutdown(self):
-        AsynchronousLogstashHandler._worker_thread.shutdown()
+        self._worker_thread.shutdown()
 
     # ----------------------------------------------------------------------
     def _wait_for_worker_thread(self):
-        AsynchronousLogstashHandler._worker_thread.join()
+        self._worker_thread.join()
 
     # ----------------------------------------------------------------------
     def _reset_worker_thread(self):
-        AsynchronousLogstashHandler._worker_thread = None
+        self._worker_thread = None
